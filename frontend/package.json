@@ -10,8 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "docx": "^9.10.0",
+    "mermaid": "^12.1.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
     "react-youtube": "^10.1.0"
   },
   "devDependencies": {
