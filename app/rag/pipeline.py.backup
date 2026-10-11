@@ -1,0 +1,503 @@
+from langchain_ollama import ChatOllama
+from qdrant_client.http import models as qdrant_models
+
+from app.vectorstore.qdrant import get_vector_store
+from app.vectorstore.embeddings import get_embeddings
+from app.rag.memory import get_history, add_message
+
+
+TUTOR_MODES = {
+    "explain": """
+You are in EXPLAIN mode.
+- Explain concepts in beginner-friendly language.
+- Break complicated ideas into smaller steps.
+- Use examples when helpful.
+- Explain technical terms simply.
+- Focus on understanding rather than memorization.
+""",
+    "summarize": """
+You are in SUMMARIZE mode.
+- Identify the main ideas and present important points as bullets.
+- Preserve important technical details and avoid repetition.
+- Include timestamps when useful.
+- Do not add information absent from the transcript.
+""",
+    "quiz": """
+You are in QUIZ mode.
+- Generate questions based on the video transcript.
+- Prefer one question at a time unless multiple are requested.
+- Ask a clear question without immediately revealing the answer.
+- Evaluate the user's answer and explain what was right or missed.
+""",
+    "interview": """
+You are in INTERVIEW mode.
+- Ask interview-style questions based on the video.
+- Prefer one question at a time and wait for the user's response.
+- Evaluate correctness, clarity, and completeness.
+- Give constructive feedback and explain an ideal answer when appropriate.
+- Increase difficulty gradually when possible.
+""",
+}
+
+
+def format_timestamp(seconds):
+    """Convert seconds into M:SS format."""
+    seconds = max(0, int(seconds or 0))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _video_filter(video_id):
+    """Build a Qdrant filter for LangChain's metadata.video_id field."""
+    return qdrant_models.Filter(
+        must=[
+            qdrant_models.FieldCondition(
+                key="metadata.video_id",
+                match=qdrant_models.MatchValue(value=video_id),
+            )
+        ]
+    )
+
+
+def _metadata(result):
+    metadata = getattr(result, "metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
+
+def _dedupe_results(results):
+    """Remove repeated transcript chunks while preserving retrieval order."""
+    unique = []
+    seen = set()
+    for result in results:
+        metadata = _metadata(result)
+        text = (getattr(result, "page_content", "") or "").strip()
+        key = (
+            metadata.get("video_id"),
+            str(metadata.get("start", "")),
+            str(metadata.get("end", "")),
+            text,
+        )
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        unique.append(result)
+    return unique
+
+def _fallback_segment(result):
+    """
+    Return a timestamped segment from chunk metadata when `segments`
+    was not stored in the Qdrant payload.
+    """
+    metadata = _metadata(result)
+    text = (getattr(result, "page_content", "") or "").strip()
+    if not text:
+        return None
+
+    start = metadata.get("start", 0)
+    end = metadata.get("end", start)
+    try:
+        start = float(start or 0)
+        end = float(end or start)
+    except (TypeError, ValueError):
+        start, end = 0.0, 0.0
+
+    return {"start": start, "end": end, "text": text}
+
+
+def get_nearby_segments(results, current_time, window=30):
+    """Find stored transcript segments near the current timestamp."""
+    nearby = []
+    current_time = float(current_time or 0)
+
+    for result in results:
+        metadata = _metadata(result)
+        segments = metadata.get("segments") or []
+
+        if segments:
+            for segment in segments:
+                try:
+                    start = float(segment.get("start", 0))
+                    end = float(segment.get("end", start))
+                except (TypeError, ValueError):
+                    continue
+
+                if start <= current_time + window and end >= current_time - window:
+                    nearby.append(segment)
+        else:
+            segment = _fallback_segment(result)
+            if segment and (
+                segment["start"] <= current_time + window
+                and segment["end"] >= current_time - window
+            ):
+                nearby.append(segment)
+
+    return nearby
+
+
+def _cosine_similarity(a, b):
+    mag_a = sum(value * value for value in a) ** 0.5
+    mag_b = sum(value * value for value in b) ** 0.5
+    if not mag_a or not mag_b:
+        return -1.0
+    return sum(x * y for x, y in zip(a, b)) / (mag_a * mag_b)
+
+
+def find_best_segment(question, results):
+    """Find the most relevant stored segment, falling back to the chunk."""
+    embeddings = get_embeddings()
+    question_embedding = embeddings.embed_query(question)
+    candidates = []
+
+    for result in results:
+        metadata = _metadata(result)
+        segments = metadata.get("segments") or []
+
+        if segments:
+            candidates.extend(
+                segment for segment in segments
+                if isinstance(segment, dict) and segment.get("text", "").strip()
+            )
+        else:
+            fallback = _fallback_segment(result)
+            if fallback:
+                candidates.append(fallback)
+
+    if not candidates:
+        return None
+
+    best_segment = None
+    best_score = -1.0
+    for segment in candidates:
+        text = segment.get("text", "").strip()
+        if not text:
+            continue
+        score = _cosine_similarity(
+            question_embedding,
+            embeddings.embed_query(text),
+        )
+        if score > best_score:
+            best_score = score
+            best_segment = segment
+
+    return best_segment
+
+
+def find_best_source(question, results):
+    """Find the most relevant timestamp and preserve its source video ID."""
+    best_source = None
+    best_score = -1.0
+    embeddings = get_embeddings()
+    question_embedding = embeddings.embed_query(question)
+
+    for result in results:
+        metadata = _metadata(result)
+        source_video_id = metadata.get("video_id")
+        if not source_video_id:
+            continue
+
+        segments = metadata.get("segments") or []
+        if not segments:
+            fallback = _fallback_segment(result)
+            segments = [fallback] if fallback else []
+
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = (segment.get("text") or "").strip()
+            if not text:
+                continue
+
+            score = _cosine_similarity(
+                question_embedding,
+                embeddings.embed_query(text),
+            )
+            if score > best_score:
+                best_score = score
+                best_source = {
+                    "video_id": source_video_id,
+                    "start": segment.get("start", metadata.get("start", 0)),
+                    "text": text,
+                }
+
+    return best_source
+
+
+def _retrieve_for_video(vector_store, question, video_id, k=4):
+    """
+    Retrieve chunks for one selected video.
+
+    First use Qdrant's metadata filter. If the filter call errors or returns
+    no hits, use a wider search and enforce the video_id in Python. This
+    fallback avoids accidentally using chunks from another selected/library
+    video while accommodating differences in installed LangChain versions.
+    """
+    video_filter = _video_filter(video_id)
+
+    try:
+        filtered = vector_store.similarity_search(
+            question,
+            k=k,
+            filter=video_filter,
+        )
+    except (TypeError, ValueError, AttributeError) as exc:
+        print(f"[VideoMentor] Filtered retrieval failed for {video_id}: {exc}")
+        filtered = []
+
+    filtered = _dedupe_results([
+        result for result in filtered
+        if _metadata(result).get("video_id") == video_id
+    ])
+    if filtered:
+        return filtered
+
+    # Compatibility fallback: search broadly, then strictly filter by ID.
+    try:
+        broad_results = vector_store.similarity_search(
+            question,
+            k=max(30, k * 10),
+        )
+    except Exception as exc:
+        print(f"[VideoMentor] Fallback retrieval failed for {video_id}: {exc}")
+        return []
+
+    return _dedupe_results([
+        result for result in broad_results
+        if _metadata(result).get("video_id") == video_id
+    ])[:k]
+
+
+def ask_video(
+    question: str,
+    video_id: str,
+    current_time: float,
+    conversation_id: str,
+    mode: str = "explain",
+    video_ids: list[str] | None = None,
+):
+    """Answer a question using one or multiple indexed YouTube videos."""
+    mode = (mode or "explain").lower().strip()
+    if mode not in TUTOR_MODES:
+        mode = "explain"
+
+    selected_video_ids = []
+    for candidate in (video_ids or [video_id]):
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if candidate and candidate not in selected_video_ids:
+                selected_video_ids.append(candidate)
+
+    if not selected_video_ids and video_id:
+        selected_video_ids = [video_id]
+
+    if not selected_video_ids:
+        return {
+            "answer": "Load a YouTube video before asking a question.",
+            "timestamp": "0:00",
+            "timestamp_seconds": 0,
+            "youtube_url": "",
+            "mode": mode,
+            "sources": [],
+        }
+
+    primary_video_id = (
+        video_id if video_id in selected_video_ids else selected_video_ids[0]
+    )
+    is_multi_video = len(selected_video_ids) > 1
+    vector_store = get_vector_store()
+
+    # Retrieve each selected video separately so results remain attributable.
+    results_by_video = {}
+    semantic_results = []
+    for selected_id in selected_video_ids:
+        video_results = _retrieve_for_video(
+            vector_store, question, selected_id, k=6
+        )
+        print("\n========== RETRIEVAL DEBUG ==========")
+        print("Question:", question)
+        print("Selected video:", selected_id)
+        print("Retrieved chunks:", len(video_results))
+        for i, doc in enumerate(video_results, start=1):
+            metadata = _metadata(doc)
+            print(f"\n--- Chunk {i} ---")
+            print("Video ID:", metadata.get("video_id"))
+            print("Start:", metadata.get("start"))
+            print("End:", metadata.get("end"))
+            print("Content:", (getattr(doc, "page_content", "") or "")[:500])
+        print("====================================\n")
+        results_by_video[selected_id] = video_results
+        semantic_results.extend(video_results)
+
+    # Timestamp context also uses the selected video's own chunks.
+    timestamp_results_by_video = {}
+    for selected_id in selected_video_ids:
+        timestamp_results_by_video[selected_id] = _retrieve_for_video(
+            vector_store, "transcript content around the current video timestamp",
+            selected_id, k=12
+        )
+
+    primary_timestamp_results = timestamp_results_by_video.get(primary_video_id, [])
+    nearby_segments = get_nearby_segments(
+        primary_timestamp_results, current_time, window=30
+    )
+    nearby_context = "\n".join(
+        f"[{format_timestamp(segment.get('start', 0))}] {segment.get('text', '')}"
+        for segment in nearby_segments
+    )
+
+    context_parts = []
+    for result in semantic_results:
+        metadata = _metadata(result)
+        source_id = metadata.get("video_id", "unknown")
+        chunk_text = (getattr(result, "page_content", "") or "").strip()
+        if chunk_text:
+            context_parts.append(
+                f"Source video ID: {source_id}\nTranscript chunk:\n{chunk_text}"
+            )
+    context = "\n\n".join(context_parts)
+
+    history = get_history(conversation_id)
+    history_text = "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')}"
+        for message in history[-10:]
+    )
+
+    if not context.strip():
+        answer = (
+            "I couldn't retrieve transcript chunks for the selected video. "
+            "Please check that loading the video finished successfully and "
+            "that its transcript was indexed, then try again."
+        )
+        add_message(
+            conversation_id, "user", question, video_id=primary_video_id
+        )
+        add_message(
+            conversation_id, "assistant", answer, video_id=primary_video_id
+        )
+        return {
+            "answer": answer,
+            "timestamp": format_timestamp(current_time),
+            "timestamp_seconds": int(current_time or 0),
+            "youtube_url": (
+                f"https://www.youtube.com/watch?v={primary_video_id}"
+                f"&t={int(current_time or 0)}s"
+            ),
+            "mode": mode,
+            "sources": [],
+        }
+
+    source_instructions = (
+        """
+- Context can come from several videos. Combine them when useful.
+- Identify sources only by the supplied video IDs.
+- Never invent a video ID or claim unsupported transcript content.
+- Distinguish information from different videos when useful.
+"""
+        if is_multi_video
+        else """
+- Answer using the supplied transcript context.
+- Do not invent source details or claim unsupported transcript content.
+"""
+    )
+
+    prompt = f"""
+You are VideoMentor, an AI tutor helping the user learn from YouTube videos.
+
+TUTOR MODE
+{TUTOR_MODES[mode]}
+
+SELECTED VIDEO IDS
+{", ".join(selected_video_ids)}
+
+CURRENT TIMESTAMP IN PRIMARY VIDEO
+{format_timestamp(current_time)}
+
+NEARBY CONTEXT FROM PRIMARY VIDEO
+{nearby_context or "(No stored chunks overlap this timestamp.)"}
+
+RELEVANT TRANSCRIPT CHUNKS
+{context}
+
+CONVERSATION HISTORY
+{history_text}
+
+RULES
+- Ground claims about the supplied videos in their transcript chunks.
+- Do not invent what a video says.
+- Do not introduce interpretations, programming paradigms, or technical claims that the transcript does not explicitly support.
+- Do not use phrases like "this suggests" to introduce unsupported conclusions.
+- Clearly distinguish transcript facts from reasonable inferences.
+- Use history to understand follow-up questions.
+- If the transcript lacks the answer, clearly say so.
+- Do not mention RAG, embeddings, Qdrant, Ollama, or internal processing.
+- Follow the selected tutor mode.
+
+SOURCE RULES
+{source_instructions}
+
+USER QUESTION
+{question}
+
+RESPONSE
+"""
+
+    llm = ChatOllama(model="llama3.2:3b", temperature=0)
+    response = llm.invoke(prompt)
+    answer = response.content
+
+    add_message(conversation_id, "user", question, video_id=primary_video_id)
+    add_message(conversation_id, "assistant", answer, video_id=primary_video_id)
+
+    # Choose the best supporting chunk per video. Source cards and Watch context
+    # use the same selected timestamp so the UI cannot show conflicting times.
+    sources = []
+    results_grouped_by_video = {}
+    for result in semantic_results:
+        source_id = _metadata(result).get("video_id")
+        if source_id:
+            results_grouped_by_video.setdefault(source_id, []).append(result)
+
+    best_source = None
+    if is_multi_video:
+        best_source = find_best_source(question, semantic_results)
+        if best_source:
+            primary_video_id = best_source["video_id"]
+            relevant_seconds = int(float(best_source.get("start", 0) or 0))
+        else:
+            relevant_seconds = int(current_time or 0)
+    else:
+        primary_results = results_grouped_by_video.get(primary_video_id, [])
+        best_segment = find_best_segment(question, primary_results)
+        if best_segment:
+            relevant_seconds = int(float(best_segment.get("start", 0) or 0))
+        elif primary_results:
+            relevant_seconds = int(float(_metadata(primary_results[0]).get("start", current_time) or 0))
+        else:
+            relevant_seconds = int(current_time or 0)
+
+    # For the primary video, align the source card with the selected Watch timestamp.
+    for source_id, source_results in results_grouped_by_video.items():
+        if source_id == primary_video_id:
+            seconds = relevant_seconds
+        else:
+            source_segment = find_best_segment(question, source_results)
+            seconds = int(float((source_segment or {}).get(
+                "start", _metadata(source_results[0]).get("start", 0)
+            ) or 0))
+        sources.append({
+            "video_id": source_id,
+            "timestamp": format_timestamp(seconds),
+            "timestamp_seconds": seconds,
+            "youtube_url": f"https://www.youtube.com/watch?v={source_id}&t={seconds}s",
+        })
+
+    return {
+        "answer": answer,
+        "timestamp": format_timestamp(relevant_seconds),
+        "timestamp_seconds": relevant_seconds,
+        "youtube_url": (
+            f"https://www.youtube.com/watch?v={primary_video_id}"
+            f"&t={relevant_seconds}s"
+        ),
+        "mode": mode,
+        "sources": sources,
+    }

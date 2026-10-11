@@ -138,7 +138,7 @@ export default function StudyGuide({
 
     try {
       const response = await fetch(
-        "http://127.0.0.1:8000/api/study-guide",
+        "http://127.0.0.1:8001/api/study-guide",
         {
           method: "POST",
           headers: {

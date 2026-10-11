@@ -5,7 +5,7 @@ import StudyGuide from "./StudyGuide";
 import Quiz from "./Quiz";
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = "http://127.0.0.1:8001";
 
 function createConversationId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -28,6 +28,22 @@ function App() {
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [videoId, setVideoId] = useState("");
   const [player, setPlayer] = useState(null);
+  const [ingesting, setIngesting] = useState(false);
+  const [ingestMessage, setIngestMessage] = useState("");
+  const [knownVideos, setKnownVideos] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("videomentor-videos") || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [selectedVideoIds, setSelectedVideoIds] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("videomentor-selected-videos") || "[]");
+    } catch {
+      return [];
+    }
+  });
 
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
@@ -58,6 +74,15 @@ function App() {
       conversationId
     );
   }, [conversationId]);
+
+  // Persist the saved video list and multi-video selection.
+  useEffect(() => {
+    localStorage.setItem("videomentor-videos", JSON.stringify(knownVideos));
+  }, [knownVideos]);
+
+  useEffect(() => {
+    localStorage.setItem("videomentor-selected-videos", JSON.stringify(selectedVideoIds));
+  }, [selectedVideoIds]);
 
   // Persist the selected theme.
   useEffect(() => {
@@ -136,27 +161,81 @@ function App() {
     setQuestion("");
   }
 
-  // Load a YouTube video.
-  function loadVideo() {
-    const extractedId = extractVideoId(youtubeUrl.trim());
+  // Ingest the transcript before making the video selectable/searchable.
+  async function loadVideo() {
+    const url = youtubeUrl.trim();
+    const extractedId = extractVideoId(url);
 
     if (!extractedId) {
       alert("Please enter a valid YouTube video URL.");
       return;
     }
+    if (ingesting) return;
 
-    if (extractedId !== videoId) {
-      // Start a fresh conversation when switching videos.
-      setConversationId(createConversationId());
-      setMessages([]);
+    setIngesting(true);
+    setIngestMessage("Fetching transcript and indexing video...");
+    try {
+      const response = await fetch(`${API_URL}/api/videos/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail || `Server returned ${response.status}`);
+      }
 
-      // Reset video-specific tools when switching videos.
+      const canonicalUrl = data.url || `https://www.youtube.com/watch?v=${extractedId}`;
+      setKnownVideos((previous) => {
+        const withoutDuplicate = previous.filter((item) => item.videoId !== extractedId);
+        return [...withoutDuplicate, {
+          videoId: extractedId,
+          url: canonicalUrl,
+          chunks: data.chunks || 0,
+          status: "indexed",
+        }];
+      });
+      setSelectedVideoIds((previous) =>
+        previous.includes(extractedId) ? previous : [...previous, extractedId]
+      );
+
+      setVideoId(extractedId);
+      setPlayer(null);
       setShowStudyGuide(false);
       setShowQuiz(false);
+      setIngestMessage(
+        data.status === "already_indexed"
+          ? "This video was already indexed. Added it to your library."
+          : `Video indexed successfully (${data.chunks || 0} chunks).`
+      );
+    } catch (error) {
+      console.error("Video ingestion failed:", error);
+      setIngestMessage(`Could not add video: ${error.message}`);
+    } finally {
+      setIngesting(false);
     }
+  }
 
-    setVideoId(extractedId);
-    setPlayer(null);
+  function toggleVideoSelection(id) {
+    setSelectedVideoIds((previous) => {
+      if (previous.includes(id)) {
+        // Keep at least one selected video whenever possible.
+        if (previous.length === 1) {
+          alert("Select at least one video for the AI tutor.");
+          return previous;
+        }
+        return previous.filter((item) => item !== id);
+      }
+      return [...previous, id];
+    });
+  }
+
+  function removeVideo(id) {
+    setKnownVideos((previous) => previous.filter((item) => item.videoId !== id));
+    setSelectedVideoIds((previous) => {
+      const next = previous.filter((item) => item !== id);
+      return next.length ? next : knownVideos.filter((item) => item.videoId !== id).slice(0, 1).map((item) => item.videoId);
+    });
   }
 
   // Called when the YouTube player is ready.
@@ -178,6 +257,8 @@ function App() {
       alert("Please load a YouTube video first.");
       return;
     }
+
+    const videosToSearch = selectedVideoIds.length ? selectedVideoIds : [videoId];
 
     if (!player) {
       alert("Please wait for the YouTube player to load.");
@@ -215,6 +296,7 @@ function App() {
         body: JSON.stringify({
           conversation_id: activeConversationId,
           video_id: videoId,
+          video_ids: videosToSearch,
           current_time: currentTime,
           question: submittedQuestion,
           mode: tutorMode,
@@ -241,6 +323,8 @@ function App() {
             ? data.timestamp_seconds
             : null,
         youtubeUrl: data.youtube_url || null,
+        sources: Array.isArray(data.sources) ? data.sources : [],
+        videoIds: videosToSearch,
         createdAt: formatMessageTime(),
       };
 
@@ -305,7 +389,7 @@ function App() {
       {/* Header */}
       <header className="header">
         <div className="brand">
-          <div className="logo">▶</div>
+          <div className="logo">▶️</div>
 
           <div>
             <h1>VideoMentor AI</h1>
@@ -361,7 +445,69 @@ function App() {
             Load Video
           </button>
         </div>
+        {ingestMessage && (
+          <p role="status" style={{ marginTop: 10, fontSize: 13 }}>
+            {ingesting ? "⏳ " : ""}{ingestMessage}
+          </p>
+        )}
       </section>
+
+      {/* Saved videos and multi-video RAG selection */}
+      {knownVideos.length > 0 && (
+        <section className="url-section" aria-label="Videos included in AI search">
+          <div className="card-heading" style={{ marginBottom: 10 }}>
+            <div>
+              <h2>📚 Your Video Library</h2>
+              <p>Select the indexed videos the AI tutor should search ({selectedVideoIds.length} selected)</p>
+            </div>
+            <button
+              type="button"
+              className="new-chat-button"
+              onClick={() => setSelectedVideoIds(knownVideos.map((item) => item.videoId))}
+              disabled={selectedVideoIds.length === knownVideos.length}
+            >
+              Select all
+            </button>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {knownVideos.map((item) => (
+              <label
+                key={item.videoId}
+                style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 12, border: "1px solid var(--border-color, rgba(128,128,128,.3))", cursor: "pointer", maxWidth: "100%" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedVideoIds.includes(item.videoId)}
+                  onChange={() => toggleVideoSelection(item.videoId)}
+                  aria-label={`Include video ${item.videoId} in AI search`}
+                />
+                <span style={{ overflowWrap: "anywhere" }}>{item.videoId}</span>
+                <a
+                  href={item.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(event) => event.stopPropagation()}
+                  title="Open video on YouTube"
+                >
+                  ↗
+                </a>
+                <button
+                  type="button"
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); removeVideo(item.videoId); }}
+                  aria-label={`Remove video ${item.videoId} from library`}
+                  title="Remove from this list"
+                  style={{ border: 0, background: "transparent", cursor: "pointer" }}
+                >
+                  ×
+                </button>
+              </label>
+            ))}
+          </div>
+          <p style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+            Videos are added here only after their transcript has been indexed. Only videos with accessible transcripts can be used.
+          </p>
+        </section>
+      )}
 
       {/* Main layout */}
       <main className="main-layout">
@@ -390,7 +536,7 @@ function App() {
               />
             ) : (
               <div className="video-placeholder">
-                <div className="placeholder-icon">▶</div>
+                <div className="placeholder-icon">▶️</div>
 
                 <h3>Your learning journey starts here</h3>
 
@@ -429,7 +575,7 @@ function App() {
                 onClick={() => setShowQuiz((previous) => !previous)}
                 aria-expanded={showQuiz}
               >
-                {showQuiz ? "✕ Hide Quiz" : "🧠 Generate AI Quiz"}
+                {showQuiz ? "✕ Hide Quiz" : "🧠  Generate AI Quiz"}
               </button>
             </>
           )}
@@ -442,7 +588,7 @@ function App() {
               <h2>AI Tutor</h2>
 
               <p>
-                Ask questions and explore concepts ·{" "}
+                Ask across {selectedVideoIds.length || (videoId ? 1 : 0)} selected video(s) Â·{" "}
                 {tutorMode[0].toUpperCase() + tutorMode.slice(1)} mode
               </p>
             </div>
@@ -467,174 +613,95 @@ function App() {
               aria-label="Tutor modes"
             >
               {[
-                {
-                  id: "explain",
-                  icon: "📘",
-                  label: "Explain",
-                },
-                {
-                  id: "summarize",
-                  icon: "📝",
-                  label: "Summarize",
-                },
-                {
-                  id: "quiz",
-                  icon: "🧠",
-                  label: "Quiz",
-                },
-                {
-                  id: "interview",
-                  icon: "🎤",
-                  label: "Interview",
-                },
+                { id: "explain", icon: "📘", label: "Explain" },
+                { id: "summarize", icon: "📝", label: "Summarize" },
+                { id: "quiz", icon: "❓", label: "Quiz" },
+                { id: "interview", icon: "🎤", label: "Interview" },
               ].map((mode) => (
                 <button
                   key={mode.id}
                   type="button"
-                  className={`tutor-mode-button ${
-                    tutorMode === mode.id ? "active" : ""
-                  }`}
+                  className={`tutor-mode-button ${tutorMode === mode.id ? "active" : ""}`}
                   onClick={() => setTutorMode(mode.id)}
                   aria-pressed={tutorMode === mode.id}
-                  disabled={loading}
-                  title={`Switch to ${mode.label} mode`}
                 >
-                  <span aria-hidden="true">
-                    {mode.icon}
-                  </span>
+                  <span>{mode.icon}</span>
                   <span>{mode.label}</span>
                 </button>
               ))}
             </div>
-
-            <p className="tutor-mode-description">
-              {tutorMode === "explain" &&
-                "Understand concepts step by step."}
-
-              {tutorMode === "summarize" &&
-                "Get the key points from the video."}
-
-              {tutorMode === "quiz" &&
-                "Answer questions to test your understanding."}
-
-              {tutorMode === "interview" &&
-                "Practice interview questions and get feedback."}
-            </p>
           </div>
 
           {/* Conversation messages */}
-          <div className="message-list">
-            {messages.length === 0 && !loading && (
-              <div className="welcome">
-                <div className="welcome-icon">✨</div>
-
+          <div className="messages-container">
+            {messages.length === 0 && (
+              <div className="empty-chat-state">
+                <div className="empty-chat-icon">💬</div>
                 <h3>What would you like to learn?</h3>
-
-                <p>
-                  Ask me to explain a concept, clarify a topic,
-                  or answer a question about your video.
-                </p>
-
-                <div className="suggestion-list">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setQuestion(
-                        "Explain the main concept of this video."
-                      )
-                    }
-                  >
-                    Explain the main concept
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setQuestion(
-                        "Summarize what has been explained so far."
-                      )
-                    }
-                  >
-                    Summarize this topic
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setQuestion(
-                        "Give me an example of this concept."
-                      )
-                    }
-                  >
-                    Give me an example
-                  </button>
-                </div>
+                <p>Ask a question about the selected video or videos.</p>
               </div>
             )}
 
             {messages.map((message) => (
               <div
                 key={message.id}
-                className={`message-row ${
-                  message.role === "user"
-                    ? "user-message-row"
-                    : "assistant-message-row"
-                }`}
+                className={`message-row ${message.role === "user" ? "user-message-row" : "assistant-message-row"}`}
               >
-                <div className="message-avatar">
-                  {message.role === "user" ? "👤" : "✨"}
-                </div>
+                {message.role === "assistant" && (
+                  <div className="message-avatar">✨</div>
+                )}
 
                 <div className="message-content">
                   <div className="message-meta">
-                    <span>
-                      {message.role === "user"
-                        ? "You"
-                        : "VideoMentor AI"}
-                    </span>
-
+                    <span>{message.role === "user" ? "You" : "VideoMentor AI"}</span>
                     <span>{message.createdAt}</span>
                   </div>
 
-                  <div
-                    className={`message-bubble ${
-                      message.role === "user"
-                        ? "user-bubble"
-                        : "assistant-bubble"
-                    } ${
-                      message.isError ? "error-bubble" : ""
-                    }`}
-                  >
-                    <div className="message-text">
-                      <ReactMarkdown>
-                       {message.content || ""}
-                      </ReactMarkdown>
-                    </div>
-
-                    {message.role === "assistant" &&
-                      message.timestampSeconds !== null &&
-                      message.timestampSeconds !== undefined && (
-                        <div className="message-timestamp">
-                          <span>
-                            📍{" "}
-                            {message.timestamp ||
-                              "Jump to context"}
-                          </span>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              jumpToTimestamp(
-                                message.timestampSeconds
-                              )
-                            }
-                            disabled={!player}
-                          >
-                            ▶ Watch context
-                          </button>
-                        </div>
-                      )}
+                  <div className={`message-bubble ${message.role === "user" ? "user-bubble" : "assistant-bubble"}`}>
+                    {message.role === "assistant" ? (
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    ) : (
+                      <p>{message.content}</p>
+                    )}
                   </div>
+
+                  {message.role === "assistant" && message.timestampSeconds !== null && message.timestampSeconds !== undefined && (
+                    <div className="message-timestamp">
+                      <span>{message.timestamp || "Jump to context"}</span>
+                      <button
+                        type="button"
+                        onClick={() => jumpToTimestamp(message.timestampSeconds)}
+                        disabled={!player}
+                      >
+                        ▶ Watch context
+                      </button>
+                    </div>
+                  )}
+
+                  {message.role === "assistant" && message.sources?.length > 0 && (
+                    <div className="message-timestamp" style={{ display: "block", marginTop: 10 }}>
+                      <strong>📚 Sources used</strong>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 7, marginTop: 8 }}>
+                        {message.sources.map((source, index) => (
+                          <div key={`${source.video_id}-${source.timestamp_seconds}-${index}`}>
+                            <a
+                              href={source.youtube_url || `https://www.youtube.com/watch?v=${source.video_id}${typeof source.timestamp_seconds === "number" ? `&t=${source.timestamp_seconds}s` : ""}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ overflowWrap: "anywhere" }}
+                            >
+                              ▶ {source.video_id}{source.timestamp ? ` · ${source.timestamp}` : ""} — Open source
+                            </a>
+                            {source.excerpt && (
+                              <p style={{ margin: "6px 0 10px 18px", fontSize: "0.92em", lineHeight: 1.45 }}>
+                                “{source.excerpt}”
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -684,7 +751,7 @@ function App() {
                       ? "Type your interview answer..."
                       : tutorMode === "summarize"
                         ? "What would you like summarized?"
-                        : "Ask anything about this video..."
+                        : "Ask across your selected videos..."
                   : "Load a video to start asking questions..."
               }
               disabled={!videoId || loading}

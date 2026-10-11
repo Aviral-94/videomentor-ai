@@ -2931,3 +2931,115 @@ textarea:focus-visible {
     padding: 13px;
   }
 }
+/* =========================================
+   VIDEOMENTOR AI — LAYOUT AND CHAT SCROLL FIX
+   ========================================= */
+
+.app {
+  min-height: 100vh;
+  height: auto;
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.main-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+  align-items: stretch;
+  gap: 24px;
+  width: 100%;
+  max-width: 1500px;
+  height: auto;
+  min-height: 620px;
+  margin: 0 auto;
+}
+
+.video-card,
+.chat-card {
+  min-width: 0;
+  min-height: 0;
+}
+
+.video-card {
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+}
+
+/* Keep chat controls visible and scroll messages inside the card */
+.chat-card {
+  display: flex;
+  flex-direction: column;
+  height: min(78vh, 900px);
+  min-height: 560px;
+  overflow: hidden;
+}
+
+/* Header, tutor modes, input and footer should not shrink */
+.conversation-header,
+.tutor-mode-section,
+.question-box,
+.chat-footer {
+  flex: 0 0 auto;
+}
+
+/* Scroll the conversation independently */
+.messages-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 12px;
+  scroll-behavior: smooth;
+}
+
+.message-row,
+.message-content,
+.message-bubble {
+  min-width: 0;
+}
+
+.message-bubble,
+.message-content {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.empty-chat-state {
+  min-height: 0;
+}
+
+/* Tablet and smaller screens */
+@media (max-width: 900px) {
+  .app {
+    padding: 18px 16px 24px;
+  }
+
+  .main-layout {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .chat-card {
+    height: 70vh;
+    min-height: 520px;
+  }
+}
+
+/* Mobile screens */
+@media (max-width: 520px) {
+  .app {
+    padding: 12px 10px 18px;
+  }
+
+  .main-layout {
+    gap: 16px;
+  }
+
+  .chat-card {
+    height: 72vh;
+    min-height: 480px;
+  }
+}
