@@ -1,7 +1,7 @@
 import json
 import re
 
-from langchain_ollama import ChatOllama
+from app.llm import get_llm
 from app.vectorstore.qdrant import get_vector_store
 
 
@@ -50,7 +50,14 @@ QUIZ_SCHEMA = {
 def parse_json_response(response):
     """Parse a JSON object returned by Ollama."""
 
-    output = str(response.content).strip()
+    raw = getattr(response, "content", response)
+    # Gemini (langchain-google-genai >=2.x) returns a list of content parts, not a plain string.
+    if isinstance(raw, list):
+        output = " ".join(
+            p.get("text", "") for p in raw if isinstance(p, dict) and p.get("type") == "text"
+        ).strip()
+    else:
+        output = str(raw).strip()
 
     # Remove Markdown fences if present.
     output = re.sub(
@@ -177,6 +184,7 @@ def validate_quiz(data, num_questions):
             isinstance(timestamp, bool)
             or not isinstance(timestamp, int)
             or timestamp < 0
+            or timestamp > 86400  # video timestamps should be within 24 hours
         ):
             raise ValueError(
                 f"Question {number} has an invalid timestamp."
@@ -288,13 +296,13 @@ def generate_quiz(
         )
 
     # --------------------------------------------------
-    # 4. Initialize local Ollama model
+    # 4. Initialize shared hybrid LLM provider
     # --------------------------------------------------
 
-    llm = ChatOllama(
-        model="llama3.2:3b",
+    llm = get_llm(
         temperature=0,
-        format=QUIZ_SCHEMA
+        json_mode=True,
+        format_schema=QUIZ_SCHEMA,
     )
 
     # --------------------------------------------------

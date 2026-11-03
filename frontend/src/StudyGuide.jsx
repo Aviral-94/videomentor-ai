@@ -9,6 +9,7 @@ import {
   HeadingLevel,
   AlignmentType,
 } from "docx";
+import { generateStudyGuide as apiGenerateStudyGuide } from "./api";
 
 import "./StudyGuide.css";
 
@@ -120,6 +121,7 @@ function MermaidDiagram({ chart }) {
 
 export default function StudyGuide({
   videoId,
+  // eslint-disable-next-line no-unused-vars
   onJumpToTimestamp,
   onClose,
 }) {
@@ -137,33 +139,7 @@ export default function StudyGuide({
     setStudyGuide(null);
 
     try {
-      const response = await fetch(
-        "http://127.0.0.1:8001/api/study-guide",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            video_id: videoId,
-          }),
-        }
-      );
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(
-          data.detail || "Could not generate the study guide."
-        );
-      }
-
-      if (!data.notes || !data.flowchart) {
-        throw new Error(
-          "The server returned incomplete study-guide data."
-        );
-      }
-
+      const data = await apiGenerateStudyGuide({ videoId });
       setStudyGuide(data);
     } catch (err) {
       console.error("Study guide request failed:", err);

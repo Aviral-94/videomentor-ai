@@ -1,6 +1,7 @@
-from langchain_ollama import ChatOllama
+from app.llm import get_llm
 
 from app.vectorstore.qdrant import get_vector_store
+from app.rag.pipeline import format_timestamp
 
 
 def generate_study_guide(video_id: str) -> dict:
@@ -65,9 +66,6 @@ def generate_study_guide(video_id: str) -> dict:
                 if start < 0:
                     start = 0
 
-                minutes = start // 60
-                seconds = start % 60
-
                 key = (start, text)
 
                 if key in seen_segments:
@@ -78,7 +76,7 @@ def generate_study_guide(video_id: str) -> dict:
                 transcript_parts.append(
                     {
                         "timestamp_seconds": start,
-                        "timestamp": f"{minutes}:{seconds:02d}",
+                        "timestamp": format_timestamp(start),
                         "text": text,
                     }
                 )
@@ -124,10 +122,7 @@ def generate_study_guide(video_id: str) -> dict:
     max_transcript_chars = 18000
     transcript = transcript[:max_transcript_chars]
 
-    llm = ChatOllama(
-        model="llama3.2:3b",
-        temperature=0,
-    )
+    llm = get_llm(temperature=0)
 
     # Generate study notes.
     notes_prompt = f"""

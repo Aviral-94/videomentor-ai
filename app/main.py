@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from threading import Lock
 
@@ -22,12 +23,23 @@ app = FastAPI(
     version="1.4.0",
 )
 
+# Dynamic CORS origins from environment variable, preserving local Vite dev server fallback
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+env_cors = os.getenv("CORS_ORIGINS", "")
+if env_cors.strip():
+    allowed_origins = [origin.strip() for origin in env_cors.split(",") if origin.strip()]
+    for origin in DEFAULT_CORS_ORIGINS:
+        if origin not in allowed_origins:
+            allowed_origins.append(origin)
+else:
+    allowed_origins = DEFAULT_CORS_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

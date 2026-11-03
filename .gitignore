@@ -24,6 +24,11 @@ Thumbs.db
 # Logs
 *.log
 
-# Local databases / data
+# Local databases / data / backups
 *.db
 *.sqlite
+backups/
+
+# Transcript cache
+.cache/
+app/.cache/

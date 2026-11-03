@@ -1,0 +1,31 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Web & ASGI Server
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+python-dotenv==1.2.4
+
+# LangChain Orchestration
+langchain==1.4.3
+langchain-core==1.6.6
+
+# LLM Providers (Groq, OpenRouter, Gemini, Ollama)
+langchain-openai==1.6.7
+langchain-google-genai==4.4.0
+langchain-ollama==1.1.0
+
+# Vector Database (Qdrant)
+langchain-qdrant==1.1.0
+qdrant-client==1.19.1
+
+# Embeddings & ML (CPU-only PyTorch)
+langchain-huggingface==1.2.2
+sentence-transformers==6.1.0
+transformers==5.18.0
+torch==2.14.1
+
+# Video Ingestion & Networking
+youtube-transcript-api==1.2.4
+httpx==0.28.1
+

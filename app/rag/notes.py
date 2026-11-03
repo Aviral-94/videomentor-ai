@@ -1,6 +1,7 @@
-from langchain_ollama import ChatOllama
+from app.llm import get_llm
 
 from app.vectorstore.qdrant import get_vector_store
+from app.rag.pipeline import format_timestamp
 
 
 def generate_video_notes(video_id: str) -> str:
@@ -53,12 +54,9 @@ def generate_video_notes(video_id: str) -> str:
 
         if segments:
             for segment in segments:
-                start = int(segment.get("start", 0))
-                minutes = start // 60
-                seconds = start % 60
-
+                start = float(segment.get("start", 0))
                 transcript_parts.append(
-                    f"[{minutes}:{seconds:02d}] "
+                    f"[{format_timestamp(start)}] "
                     f"{segment.get('text', '').strip()}"
                 )
         else:
@@ -74,11 +72,8 @@ def generate_video_notes(video_id: str) -> str:
             "The indexed video does not contain usable transcript text."
         )
 
-    # 5. Initialize the existing local LLM.
-    llm = ChatOllama(
-        model="llama3.2:3b",
-        temperature=0,
-    )
+    # 5. Initialize the shared hybrid LLM provider.
+    llm = get_llm(temperature=0)
 
     # 6. Generate structured study notes.
     prompt = f"""

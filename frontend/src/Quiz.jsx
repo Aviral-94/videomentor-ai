@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
+import { generateQuiz as apiGenerateQuiz } from "./api";
 
-const API_URL = "http://127.0.0.1:8001";
 const HISTORY_KEY = "videomentor-quiz-history";
 
 function loadQuizHistory() {
@@ -46,6 +46,7 @@ export default function Quiz({ videoId, onJumpToTimestamp }) {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
     } catch (error) {
       console.error("Could not save quiz history:", error);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setError(
         "Quiz history could not be saved. Your browser storage may be full."
       );
@@ -64,42 +65,16 @@ export default function Quiz({ videoId, onJumpToTimestamp }) {
     setShowHistory(false);
 
     try {
-      const response = await fetch(`${API_URL}/api/quiz`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          video_id: videoId,
-          num_questions: questionCount,
-          difficulty,
-        }),
+      const data = await apiGenerateQuiz({
+        videoId,
+        numQuestions: questionCount,
+        difficulty,
       });
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        const detail =
-          typeof data.detail === "string"
-            ? data.detail
-            : `Quiz request failed (${response.status}).`;
-
-        throw new Error(detail);
-      }
-
-      if (
-        !Array.isArray(data.questions) ||
-        data.questions.length === 0
-      ) {
-        throw new Error("The backend returned no quiz questions.");
-      }
 
       setQuestions(data.questions);
     } catch (err) {
-      setError(
-        `${err.message || "Could not generate the quiz."} ` +
-          "Check that FastAPI, Ollama, and Qdrant are running."
-      );
+      console.error("Quiz generation failed:", err);
+      setError(err.message || "Could not generate the quiz.");
     } finally {
       setLoading(false);
     }

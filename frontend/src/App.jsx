@@ -3,9 +3,12 @@ import ReactMarkdown from "react-markdown";
 import YouTube from "react-youtube";
 import StudyGuide from "./StudyGuide";
 import Quiz from "./Quiz";
+import {
+  sendChatMessage,
+  ingestVideo,
+  clearChatHistory,
+} from "./api";
 import "./App.css";
-
-const API_URL = "http://127.0.0.1:8001";
 
 function createConversationId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -102,8 +105,16 @@ function App() {
 
   // Extract YouTube video ID.
   function extractVideoId(url) {
+    const raw = (url || "").trim();
+    if (/^[A-Za-z0-9_-]{11}$/.test(raw)) {
+      return raw;
+    }
+
     try {
-      const parsedUrl = new URL(url);
+      const urlToParse = !/^https?:\/\//i.test(raw) && (raw.includes("youtube.com") || raw.includes("youtu.be"))
+        ? `https://${raw}`
+        : raw;
+      const parsedUrl = new URL(urlToParse);
 
       if (parsedUrl.hostname.includes("youtu.be")) {
         return (
@@ -144,14 +155,7 @@ function App() {
     const oldConversationId = conversationId;
 
     try {
-      await fetch(
-        `${API_URL}/api/chat/history/${encodeURIComponent(
-          oldConversationId
-        )}`,
-        {
-          method: "DELETE",
-        }
-      );
+      await clearChatHistory(oldConversationId);
     } catch (error) {
       console.warn("Could not clear server memory:", error);
     }
@@ -175,15 +179,7 @@ function App() {
     setIngesting(true);
     setIngestMessage("Fetching transcript and indexing video...");
     try {
-      const response = await fetch(`${API_URL}/api/videos/ingest`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.detail || `Server returned ${response.status}`);
-      }
+      const data = await ingestVideo(url);
 
       const canonicalUrl = data.url || `https://www.youtube.com/watch?v=${extractedId}`;
       setKnownVideos((previous) => {
@@ -288,30 +284,14 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/api/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          conversation_id: activeConversationId,
-          video_id: videoId,
-          video_ids: videosToSearch,
-          current_time: currentTime,
-          question: submittedQuestion,
-          mode: tutorMode,
-        }),
+      const data = await sendChatMessage({
+        conversation_id: activeConversationId,
+        video_id: videoId,
+        video_ids: videosToSearch,
+        current_time: currentTime,
+        question: submittedQuestion,
+        mode: tutorMode,
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        throw new Error(
-          `Server returned ${response.status}: ${errorText}`
-        );
-      }
-
-      const data = await response.json();
 
       const assistantMessage = {
         id: createConversationId(),
@@ -338,20 +318,18 @@ function App() {
     } catch (error) {
       console.error("Chat request failed:", error);
 
-      setMessages((previousMessages) => [
-        ...previousMessages,
-        {
-          id: createConversationId(),
-          role: "assistant",
-          content:
-            "Sorry, I could not connect to the AI tutor. " +
-            "Please check that the FastAPI backend, Ollama, " +
-            "and Qdrant are running, then try again.\n\n" +
-            `Details: ${error.message}`,
-          createdAt: formatMessageTime(),
-          isError: true,
-        },
-      ]);
+      if (activeConversationId === conversationId) {
+        setMessages((previousMessages) => [
+          ...previousMessages,
+          {
+            id: createConversationId(),
+            role: "assistant",
+            content: error.message || "An unexpected error occurred while communicating with the AI tutor.",
+            createdAt: formatMessageTime(),
+            isError: true,
+          },
+        ]);
+      }
     } finally {
       setLoading(false);
     }
